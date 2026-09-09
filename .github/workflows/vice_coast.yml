@@ -24,7 +24,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+      - name: Fix Godot export templates
+        run: |
+          mkdir -p "$HOME/.local/share/godot/export_templates"
+          cp -R /root/.local/share/godot/export_templates/4.7.2.stable "$HOME/.local/share/godot/export_templates/4.7.2.stable"
       - name: Unpack game
         run: |
           rm -rf game
