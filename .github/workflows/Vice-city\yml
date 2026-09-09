@@ -1,0 +1,252 @@
+name: Build Vice Coast for iPhone
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Unpack Godot project
+        run: |
+          rm -rf game
+          mkdir game
+          unzip -q VICE_COAST_GODOT_IPHONE.zip -d game
+
+      - name: Fix iPhone project
+        run: |
+          cat > game/scripts/player.gd <<'GDSCRIPT'
+          extends CharacterBody3D
+
+          @export var walk_speed := 6.0
+          @export var sprint_speed := 10.0
+          @export var acceleration := 18.0
+          @export var jump_velocity := 7.0
+          @export var mouse_sensitivity := 0.0026
+          @export var interact_distance := 4.2
+
+          @onready var model: Node3D = $Model
+          @onready var camera_pivot: Node3D = $CameraPivot
+          @onready var camera: Camera3D = $CameraPivot/SpringArm3D/Camera3D
+
+          var gravity := 19.0
+          var camera_yaw := 0.0
+          var camera_pitch := -0.16
+          var active := true
+          var current_vehicle: Node = null
+
+          func _ready() -> void:
+              add_to_group("player")
+              camera.current = true
+
+          func _physics_process(delta: float) -> void:
+              if not active:
+                  return
+
+              var input_vec := Input.get_vector(
+                  "move_left",
+                  "move_right",
+                  "move_forward",
+                  "move_back"
+              )
+
+              var mobile = get_tree().get_first_node_in_group("mobile_controls")
+
+              if mobile != null:
+                  var mobile_vec: Vector2 = mobile.get_move_vector()
+
+                  if mobile_vec.length() > input_vec.length():
+                      input_vec = mobile_vec
+
+                  var look: Vector2 = mobile.consume_look_delta()
+
+                  camera_yaw -= look.x * mouse_sensitivity * 1.25
+                  camera_pitch = clamp(
+                      camera_pitch - look.y * mouse_sensitivity,
+                      -0.95,
+                      0.35
+                  )
+
+                  camera_pivot.rotation = Vector3(
+                      camera_pitch,
+                      camera_yaw,
+                      0.0
+                  )
+
+              var local_dir := Vector3(
+                  input_vec.x,
+                  0.0,
+                  input_vec.y
+              )
+
+              var world_dir := local_dir.rotated(
+                  Vector3.UP,
+                  camera_yaw
+              ).normalized()
+
+              var speed := walk_speed
+
+              if Input.is_action_pressed("sprint"):
+                  speed = sprint_speed
+
+              var desired := world_dir * speed
+
+              velocity.x = move_toward(
+                  velocity.x,
+                  desired.x,
+                  acceleration * delta
+              )
+
+              velocity.z = move_toward(
+                  velocity.z,
+                  desired.z,
+                  acceleration * delta
+              )
+
+              if not is_on_floor():
+                  velocity.y -= gravity * delta
+
+              if is_on_floor() and Input.is_action_just_pressed("jump"):
+                  velocity.y = jump_velocity
+
+              if world_dir.length_squared() > 0.02:
+                  var facing := atan2(
+                      world_dir.x,
+                      world_dir.z
+                  )
+
+                  model.rotation.y = lerp_angle(
+                      model.rotation.y,
+                      facing,
+                      delta * 10.0
+                  )
+
+              move_and_slide()
+
+              if Input.is_action_just_pressed("interact"):
+                  try_enter_car()
+
+          func try_enter_car() -> void:
+              var nearest_car: Node3D = null
+              var nearest_distance := interact_distance
+
+              for car in get_tree().get_nodes_in_group("drivable_cars"):
+
+                  if not car is Node3D:
+                      continue
+
+                  var distance := global_position.distance_to(
+                      car.global_position
+                  )
+
+                  if distance < nearest_distance:
+                      nearest_distance = distance
+                      nearest_car = car
+
+              if nearest_car != null:
+                  nearest_car.enter_vehicle(self)
+
+          func enter_vehicle(car: Node) -> void:
+              current_vehicle = car
+
+              active = false
+              visible = false
+
+              collision_layer = 0
+              collision_mask = 0
+
+              camera.current = false
+
+              velocity = Vector3.ZERO
+
+          func exit_vehicle(exit_position: Vector3) -> void:
+              current_vehicle = null
+
+              global_position = exit_position
+
+              visible = true
+              active = true
+
+              collision_layer = 2
+              collision_mask = 1
+
+              camera.current = true
+          GDSCRIPT
+
+          sed -i 's/\[gd_scene load_steps=11 format=3\]/[gd_scene load_steps=9 format=3]/' game/scenes/player.tscn
+
+          sed -i 's/var mobile := get_tree().get_first_node_in_group("mobile_controls")/var mobile = get_tree().get_first_node_in_group("mobile_controls")/' game/scripts/car.gd
+
+      - name: Download Godot
+        run: |
+          wget -q https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip
+
+          unzip -q Godot_v4.7.2-stable_linux.x86_64.zip
+
+          chmod +x Godot_v4.7.2-stable_linux.x86_64
+
+          mv Godot_v4.7.2-stable_linux.x86_64 godot
+
+      - name: Install export templates
+        run: |
+          wget -q https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_export_templates.tpz
+
+          mkdir -p templates
+
+          unzip -q Godot_v4.7.2-stable_export_templates.tpz -d templates
+
+          mkdir -p "$HOME/.local/share/godot/export_templates/4.7.2.stable"
+
+          cp -R templates/templates/. "$HOME/.local/share/godot/export_templates/4.7.2.stable/"
+
+      - name: Import game
+        run: |
+          ./godot --headless --path game --import
+
+      - name: Export game for iPhone browser
+        run: |
+          mkdir -p game/build/web
+
+          ./godot \
+            --headless \
+            --path game \
+            --export-release "Web" \
+            build/web/index.html
+
+          touch game/build/web/.nojekyll
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload game
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: game/build/web
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
